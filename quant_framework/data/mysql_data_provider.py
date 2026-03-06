@@ -67,6 +67,7 @@ class MySQLDataProvider(DataProvider):
         SELECT 
             `日期` as date,
             `股票代码` as symbol,
+            `行业` as industry,
             `开盘` as open,
             `收盘` as close,
             `最高` as high,
@@ -109,7 +110,7 @@ class MySQLDataProvider(DataProvider):
                     return pd.DataFrame()
                 
                 # 转换为DataFrame
-                columns = ['date', 'symbol', 'open', 'close', 'high', 'low', 'amount']
+                columns = ['date', 'symbol', 'industry', 'open', 'close', 'high', 'low', 'amount']
                 df = pd.DataFrame(rows, columns=columns)
                 
                 print(f"数据获取成功，原始数据形状: {df.shape}")
@@ -172,7 +173,6 @@ class MySQLDataProvider(DataProvider):
         query = f"""
         SELECT DISTINCT `股票代码` 
         FROM {self.table_name}
-        LIMIT 5
         """
         
         print(f"执行股票列表查询: {query}")

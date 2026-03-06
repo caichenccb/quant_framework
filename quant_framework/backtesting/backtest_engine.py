@@ -68,6 +68,7 @@ class Strategy:
         self.initial_cash = initial_cash
         self.positions = {}
         self.trades = []
+        self.data = data
     
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -172,6 +173,241 @@ class RSIStrategy(Strategy):
         return data
 
 
+class MACDStrategy(Strategy):
+    """MACD策略"""
+    
+    def __init__(self, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9):
+        super().__init__("MACD")
+        self.fast_period = fast_period
+        self.slow_period = slow_period
+        self.signal_period = signal_period
+    
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """生成MACD信号"""
+        data = data.copy()
+        
+        # 计算MACD
+        def calculate_macd(series, fast_period=12, slow_period=26, signal_period=9):
+            exp12 = series.ewm(span=fast_period, adjust=False).mean()
+            exp26 = series.ewm(span=slow_period, adjust=False).mean()
+            macd = exp12 - exp26
+            signal = macd.ewm(span=signal_period, adjust=False).mean()
+            return macd, signal
+        
+        # 分别计算MACD和信号线
+        macd_list = []
+        signal_list = []
+        for symbol in data['symbol'].unique():
+            symbol_data = data[data['symbol'] == symbol]['close'].reset_index(drop=True)
+            macd, signal = calculate_macd(symbol_data, self.fast_period, self.slow_period, self.signal_period)
+            macd_list.extend(macd.tolist())
+            signal_list.extend(signal.tolist())
+        
+        data['macd'] = macd_list
+        data['macd_signal'] = signal_list
+        data['macd_hist'] = data['macd'] - data['macd_signal']
+        
+        # 生成信号
+        data['signal'] = 0
+        data['macd_hist_prev'] = data.groupby('symbol')['macd_hist'].shift(1)
+        data.loc[(data['macd_hist'] > 0) & (data['macd_hist_prev'] <= 0), 'signal'] = 1  # 金叉买入
+        data.loc[(data['macd_hist'] < 0) & (data['macd_hist_prev'] >= 0), 'signal'] = -1  # 死叉卖出
+        
+        return data
+
+
+class BollingerBandsStrategy(Strategy):
+    """布林带策略"""
+    
+    def __init__(self, window: int = 20, num_std: float = 2):
+        super().__init__("BollingerBands")
+        self.window = window
+        self.num_std = num_std
+    
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """生成布林带信号"""
+        data = data.copy()
+        
+        # 计算布林带
+        data['bb_middle'] = data.groupby('symbol')['close'].transform(lambda x: x.rolling(window=self.window).mean())
+        data['bb_std'] = data.groupby('symbol')['close'].transform(lambda x: x.rolling(window=self.window).std())
+        data['bb_upper'] = data['bb_middle'] + self.num_std * data['bb_std']
+        data['bb_lower'] = data['bb_middle'] - self.num_std * data['bb_std']
+        
+        # 生成信号
+        data['signal'] = 0
+        data.loc[data['close'] < data['bb_lower'], 'signal'] = 1  # 下轨突破买入
+        data.loc[data['close'] > data['bb_upper'], 'signal'] = -1  # 上轨突破卖出
+        
+        return data
+
+
+class KDJStrategy(Strategy):
+    """KDJ策略"""
+    
+    def __init__(self, period: int = 9, k_period: int = 3, d_period: int = 3):
+        super().__init__("KDJ")
+        self.period = period
+        self.k_period = k_period
+        self.d_period = d_period
+    
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """生成KDJ信号"""
+        data = data.copy()
+        
+        # 计算KDJ
+        def calculate_kdj(high, low, close, period=9, k_period=3, d_period=3):
+            # 计算RSV
+            rsv = []
+            for i in range(len(close)):
+                if i < period - 1:
+                    rsv.append(50)
+                else:
+                    high_max = max(high[i-period+1:i+1])
+                    low_min = min(low[i-period+1:i+1])
+                    if high_max == low_min:
+                        rsv.append(50)
+                    else:
+                        rsv.append((close[i] - low_min) / (high_max - low_min) * 100)
+            
+            # 计算K和D
+            k = []
+            d = []
+            for i in range(len(rsv)):
+                if i == 0:
+                    k_val = 50
+                    d_val = 50
+                else:
+                    k_val = (2/3) * k[i-1] + (1/3) * rsv[i]
+                    d_val = (2/3) * d[i-1] + (1/3) * k_val
+                k.append(k_val)
+                d.append(d_val)
+            
+            # 计算J
+            j = [3 * k_val - 2 * d_val for k_val, d_val in zip(k, d)]
+            
+            return k, d, j
+        
+        # 分别计算KDJ
+        k_list = []
+        d_list = []
+        j_list = []
+        for symbol in data['symbol'].unique():
+            symbol_data = data[data['symbol'] == symbol]
+            high = symbol_data['high'].tolist()
+            low = symbol_data['low'].tolist()
+            close = symbol_data['close'].tolist()
+            k, d, j = calculate_kdj(high, low, close, self.period, self.k_period, self.d_period)
+            k_list.extend(k)
+            d_list.extend(d)
+            j_list.extend(j)
+        
+        data['k'] = k_list
+        data['d'] = d_list
+        data['j'] = j_list
+        
+        # 生成信号
+        data['signal'] = 0
+        data.loc[(data['k'] < 20) & (data['d'] < 20) & (data['j'] < 20), 'signal'] = 1  # 超卖买入
+        data.loc[(data['k'] > 80) & (data['d'] > 80) & (data['j'] > 80), 'signal'] = -1  # 超买卖出
+        
+        return data
+
+
+class VolumeStrategy(Strategy):
+    """成交量策略"""
+    
+    def __init__(self, volume_period: int = 20, volume_ratio: float = 1.5):
+        super().__init__("Volume")
+        self.volume_period = volume_period
+        self.volume_ratio = volume_ratio
+    
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """生成成交量信号"""
+        data = data.copy()
+        
+        # 计算成交量移动平均线
+        data['volume_ma'] = data.groupby('symbol')['amount'].transform(lambda x: x.rolling(window=self.volume_period).mean())
+        data['volume_ratio'] = data['amount'] / data['volume_ma']
+        
+        # 生成信号
+        data['signal'] = 0
+        data.loc[data['volume_ratio'] > self.volume_ratio, 'signal'] = 1  # 成交量放大买入
+        
+        return data
+
+
+class MomentumStrategy(Strategy):
+    """动量策略"""
+    
+    def __init__(self, momentum_period: int = 12):
+        super().__init__("Momentum")
+        self.momentum_period = momentum_period
+    
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """生成动量信号"""
+        data = data.copy()
+        
+        # 计算动量
+        data['momentum'] = data.groupby('symbol')['close'].transform(lambda x: x / x.shift(self.momentum_period) - 1)
+        
+        # 生成信号
+        data['signal'] = 0
+        data.loc[data['momentum'] > 0, 'signal'] = 1  # 动量为正买入
+        data.loc[data['momentum'] < 0, 'signal'] = -1  # 动量为负卖出
+        
+        return data
+
+
+# 导入新的行业周期策略
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from strategies.industry_cycle_strategy import IndustryCycleStrategy, IndustryCyclePhase
+
+
+class IndustryStrategy(IndustryCycleStrategy):
+    """
+    行业周期策略 - 基于多维度指标判断行业复苏/衰退
+    
+    核心指标：
+    1. 价格动量（短期/中期/长期）
+    2. 资金流向（成交量/成交额）
+    3. 趋势强度（均线排列）
+    4. RSI超买超卖
+    5. 波动率
+    
+    综合评分系统生成买卖信号
+    """
+    
+    def __init__(self, momentum_periods: list = None, rsi_period: int = 14, 
+                 rsi_threshold: float = 30, exit_threshold: float = 70):
+        # 使用新的策略框架初始化
+        super().__init__(
+            rsi_period=rsi_period,
+            rsi_oversold=rsi_threshold,
+            rsi_overbought=exit_threshold
+        )
+        self.name = "Industry"
+        self.data = None
+        self.cash = 0
+        self.positions = {}
+    
+    def initialize(self, data: pd.DataFrame, initial_cash: float = 100000):
+        """初始化策略"""
+        self.data = data
+        self.cash = initial_cash
+        self.positions = {}
+    
+    def get_portfolio_value(self, current_prices: Dict[str, float]) -> float:
+        """获取组合价值"""
+        position_value = sum(
+            pos.shares * current_prices.get(symbol, 0)
+            for symbol, pos in self.positions.items()
+        )
+        return self.cash + position_value
+
+
 class BacktestEngine:
     """回测引擎"""
     
@@ -210,24 +446,28 @@ class BacktestEngine:
         # 按日期排序
         data_with_signals = data_with_signals.sort_values('date').reset_index(drop=True)
         
-        # 逐日回测
-        for idx, row in data_with_signals.iterrows():
-            current_prices = dict(zip(data_with_signals['symbol'], data_with_signals['close']))
+        # 按日期分组回测
+        for date, date_data in data_with_signals.groupby('date'):
+            # 计算当前日期的所有股票价格
+            current_prices = dict(zip(date_data['symbol'], date_data['close']))
             
             # 更新持仓价值
             portfolio_value = self.strategy.get_portfolio_value(current_prices)
             self.equity_curve.append({
-                'date': row['date'],
+                'date': date,
                 'value': portfolio_value
             })
             
             # 执行交易
-            if row['signal'] != 0:
-                self._execute_trade(row, current_prices)
+            for idx, row in date_data.iterrows():
+                if row['signal'] != 0:
+                    self._execute_trade(row, current_prices)
         
         # 平仓所有持仓
         final_prices = dict(zip(data_with_signals['symbol'], data_with_signals['close']))
-        self._close_all_positions(final_prices)
+        # 获取最后一天日期
+        last_date = data_with_signals['date'].iloc[-1]
+        self._close_all_positions(final_prices, last_date)
         
         # 计算最终组合价值
         final_value = self.strategy.get_portfolio_value(final_prices)
@@ -240,46 +480,106 @@ class BacktestEngine:
         """执行交易"""
         symbol = row['symbol']
         signal = row['signal']
-        price = row['close'] * (1 + self.slippage * signal)
+        industry = row.get('industry', None)
         
-        if signal == 1:  # 买入
-            if symbol not in self.strategy.positions:
-                max_shares = int(self.strategy.cash / (price * (1 + self.commission)))
-                if max_shares > 0:
-                    cost = max_shares * price * (1 + self.commission)
-                    self.strategy.cash -= cost
-                    self.strategy.positions[symbol] = Position(
-                        symbol=symbol,
-                        shares=max_shares,
-                        entry_price=price,
-                        entry_date=row['date']
-                    )
+        # 对于行业策略，需要处理行业级别的交易
+        if self.strategy.name == "Industry" and industry:
+            # 获取当前日期该行业的所有股票
+            current_date = row['date']
+            # 优化：使用pandas的条件过滤，而不是列表推导式
+            industry_stocks = self.strategy.data.loc[
+                (self.strategy.data['date'] == current_date) & 
+                (self.strategy.data['industry'] == industry),
+                'symbol'
+            ].unique().tolist()
+            
+            if signal == 1:  # 买入该行业所有股票
+                # 计算每个股票的购买金额（平均分配资金）
+                if self.strategy.cash > 0 and industry_stocks:
+                    cash_per_stock = self.strategy.cash / len(industry_stocks)
+                    for stock in industry_stocks:
+                        if stock not in self.strategy.positions:
+                            price = current_prices.get(stock, row['close']) * (1 + self.slippage)
+                            max_shares = int(cash_per_stock / (price * (1 + self.commission)))
+                            if max_shares > 0:
+                                cost = max_shares * price * (1 + self.commission)
+                                self.strategy.cash -= cost
+                                self.strategy.positions[stock] = Position(
+                                    symbol=stock,
+                                    shares=max_shares,
+                                    entry_price=price,
+                                    entry_date=current_date
+                                )
+                                self.all_trades.append(Trade(
+                                    symbol=stock,
+                                    action='buy',
+                                    shares=max_shares,
+                                    price=price,
+                                    date=current_date,
+                                    commission=max_shares * price * self.commission
+                                ))
+            
+            elif signal == -1:  # 卖出该行业所有股票
+                for stock in industry_stocks:
+                    if stock in self.strategy.positions:
+                        position = self.strategy.positions[stock]
+                        price = current_prices.get(stock, row['close']) * (1 - self.slippage)
+                        revenue = position.shares * price * (1 - self.commission)
+                        self.strategy.cash += revenue
+                        self.all_trades.append(Trade(
+                            symbol=stock,
+                            action='sell',
+                            shares=position.shares,
+                            price=price,
+                            date=current_date,
+                            commission=position.shares * price * self.commission
+                        ))
+                        del self.strategy.positions[stock]
+        else:
+            # 传统股票策略交易
+            price = row['close'] * (1 + self.slippage * signal)
+            
+            if signal == 1:  # 买入
+                if symbol not in self.strategy.positions:
+                    max_shares = int(self.strategy.cash / (price * (1 + self.commission)))
+                    if max_shares > 0:
+                        cost = max_shares * price * (1 + self.commission)
+                        self.strategy.cash -= cost
+                        self.strategy.positions[symbol] = Position(
+                            symbol=symbol,
+                            shares=max_shares,
+                            entry_price=price,
+                            entry_date=row['date']
+                        )
+                        self.all_trades.append(Trade(
+                            symbol=symbol,
+                            action='buy',
+                            shares=max_shares,
+                            price=price,
+                            date=row['date'],
+                            commission=max_shares * price * self.commission
+                        ))
+            
+            elif signal == -1:  # 卖出
+                if symbol in self.strategy.positions:
+                    position = self.strategy.positions[symbol]
+                    revenue = position.shares * price * (1 - self.commission)
+                    self.strategy.cash += revenue
                     self.all_trades.append(Trade(
                         symbol=symbol,
-                        action='buy',
-                        shares=max_shares,
+                        action='sell',
+                        shares=position.shares,
                         price=price,
                         date=row['date'],
-                        commission=max_shares * price * self.commission
+                        commission=position.shares * price * self.commission
                     ))
-        
-        elif signal == -1:  # 卖出
-            if symbol in self.strategy.positions:
-                position = self.strategy.positions[symbol]
-                revenue = position.shares * price * (1 - self.commission)
-                self.strategy.cash += revenue
-                self.all_trades.append(Trade(
-                    symbol=symbol,
-                    action='sell',
-                    shares=position.shares,
-                    price=price,
-                    date=row['date'],
-                    commission=position.shares * price * self.commission
-                ))
-                del self.strategy.positions[symbol]
+                    del self.strategy.positions[symbol]
     
-    def _close_all_positions(self, current_prices: Dict[str, float]):
+    def _close_all_positions(self, current_prices: Dict[str, float], close_date=None):
         """平仓所有持仓"""
+        if close_date is None:
+            close_date = datetime.now()
+            
         for symbol, position in list(self.strategy.positions.items()):
             if symbol in current_prices:
                 price = current_prices[symbol] * (1 - self.slippage)
@@ -290,7 +590,7 @@ class BacktestEngine:
                     action='sell',
                     shares=position.shares,
                     price=price,
-                    date=datetime.now(),
+                    date=close_date,
                     commission=position.shares * price * self.commission
                 ))
                 del self.strategy.positions[symbol]
